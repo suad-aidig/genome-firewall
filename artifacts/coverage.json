@@ -1,0 +1,22 @@
+{
+  "doripenem": {
+    "no_call_pct": 9.8,
+    "balanced_acc_on_called": 0.886,
+    "ood_tau": 13.0
+  },
+  "ertapenem": {
+    "no_call_pct": 19.4,
+    "balanced_acc_on_called": 0.952,
+    "ood_tau": 13.0
+  },
+  "imipenem": {
+    "no_call_pct": 17.5,
+    "balanced_acc_on_called": 0.951,
+    "ood_tau": 13.0
+  },
+  "meropenem": {
+    "no_call_pct": 12.6,
+    "balanced_acc_on_called": 0.916,
+    "ood_tau": 12.1
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "drugs": [
+    "doripenem",
+    "ertapenem",
+    "imipenem",
+    "meropenem"
+  ],
+  "n_features": 324,
+  "eps": 2,
+  "known_carbapenemases": [
+    "KPC",
+    "NDM",
+    "OXA-48",
+    "OXA-181",
+    "OXA-232",
+    "OXA-232",
+    "VIM",
+    "IMP",
+    "GES",
+    "SPM"
+  ]
+}

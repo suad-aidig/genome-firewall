@@ -1,0 +1,58 @@
+{
+  "doripenem": {
+    "n": 316,
+    "resistant_frac": 0.763,
+    "balanced_acc": 0.87,
+    "recall_resistant": 0.979,
+    "recall_susceptible": 0.76,
+    "f1": 0.954,
+    "auroc": 0.932,
+    "pr_auc": 0.972,
+    "brier": 0.071,
+    "brier_uncalibrated": 0.073,
+    "fold_auroc_mean": 0.887,
+    "fold_auroc_std": 0.064
+  },
+  "ertapenem": {
+    "n": 180,
+    "resistant_frac": 0.494,
+    "balanced_acc": 0.883,
+    "recall_resistant": 0.854,
+    "recall_susceptible": 0.912,
+    "f1": 0.879,
+    "auroc": 0.944,
+    "pr_auc": 0.948,
+    "brier": 0.095,
+    "brier_uncalibrated": 0.09,
+    "fold_auroc_mean": 0.92,
+    "fold_auroc_std": 0.025
+  },
+  "imipenem": {
+    "n": 200,
+    "resistant_frac": 0.565,
+    "balanced_acc": 0.87,
+    "recall_resistant": 0.867,
+    "recall_susceptible": 0.874,
+    "f1": 0.883,
+    "auroc": 0.953,
+    "pr_auc": 0.968,
+    "brier": 0.086,
+    "brier_uncalibrated": 0.081,
+    "fold_auroc_mean": 0.894,
+    "fold_auroc_std": 0.091
+  },
+  "meropenem": {
+    "n": 238,
+    "resistant_frac": 0.445,
+    "balanced_acc": 0.881,
+    "recall_resistant": 0.868,
+    "recall_susceptible": 0.894,
+    "f1": 0.868,
+    "auroc": 0.933,
+    "pr_auc": 0.912,
+    "brier": 0.095,
+    "brier_uncalibrated": 0.096,
+    "fold_auroc_mean": 0.902,
+    "fold_auroc_std": 0.047
+  }
+}
