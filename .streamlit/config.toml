@@ -1,0 +1,15 @@
+# Locked light "clinical" theme — consistent look for demo recording, and the
+# report cards are designed for a light background.
+[theme]
+base = "light"
+primaryColor = "#185FA5"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6F9"
+textColor = "#1A1A1A"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

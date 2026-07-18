@@ -26,7 +26,7 @@ import streamlit as st
 
 # Import the decision layer (ground truth for the science) --------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from decisions import prob, decide, driving_genes, DRUGS
+from decisions import prob, decide, driving_genes, is_carbapenemase, DRUGS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROC = os.path.join(HERE, "..", "data", "processed")
@@ -244,6 +244,119 @@ def render_true_label(true_label, p_source):
             f"<span style='color:#999;'>({src})</span></span>")
 
 
+# Curated demo cases — one per verdict/no-call type, for a clean walkthrough.
+SHOWCASE = {
+    "🟢 Susceptible — all carbapenems likely to work · PDT000022731.1": "PDT000022731.1",
+    "🔴 KPC-3 carbapenemase — all likely to fail · PDT000015892.2": "PDT000015892.2",
+    "🟡 KPC present but conflicting — honest no-call · PDT000016131.2": "PDT000016131.2",
+    "🟡 Out-of-distribution — novelty no-call · PDT000130449.2": "PDT000130449.2",
+}
+
+
+# ---------------------------------------------------------------------------- #
+# Clinical Copilot — OPTIONAL OpenAI narrative layer                            #
+# The LLM never predicts: it only rephrases the deterministic, already-computed #
+# structured results below into clinician-facing language.                      #
+# ---------------------------------------------------------------------------- #
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+COPILOT_SYSTEM = (
+    "You are a clinical-microbiology decision-support assistant for GENOME FIREWALL, a "
+    "research prototype that predicts carbapenem response for Klebsiella pneumoniae from "
+    "AMR gene features. You are handed the system's ALREADY-COMPUTED, calibrated results "
+    "for a single isolate. Your only job is to explain those results plainly for a busy "
+    "clinician. Hard rules: (1) Never invent, change, or add predictions, probabilities, "
+    "drugs, or genes beyond what is provided. (2) Treat every no_call as a deliberate "
+    "abstention, NOT a resistance prediction. (3) Never make a treatment or dosing "
+    "decision — you support the clinician, you do not decide. (4) This tool is strictly "
+    "defensive; never discuss modifying, designing, or optimizing organisms. (5) Keep it "
+    "under ~180 words: a one-line headline, then a short reason per drug, then one "
+    "next-step line. (6) Always end by stating results must be confirmed by standard "
+    "laboratory AST."
+)
+
+
+def _copilot_key():
+    """Return an OpenAI key from env or Streamlit secrets, or None."""
+    key = os.environ.get("OPENAI_API_KEY")
+    if key:
+        return key
+    try:
+        return st.secrets["OPENAI_API_KEY"]
+    except Exception:
+        return None
+
+
+def _copilot_context(results, iso):
+    lines = [f"Isolate: {iso or 'pasted/uploaded'} | Species: Klebsiella pneumoniae "
+             f"| Drug class: carbapenems"]
+    for r in results:
+        conf = (f"{int(r['confidence']*100)}%" if r["confidence"] is not None
+                else "withheld (no-call)")
+        drivers = ", ".join(
+            f"{g['gene']}({'+' if g['weight'] >= 0 else '-'}{abs(g['weight'])}"
+            f"{'[known carbapenemase]' if g['known_carbapenemase'] else ''})"
+            for g in r["driving_features"][:4]) or "no resistance genes present"
+        lines.append(
+            f"- {r['drug']}: verdict={r['verdict']}; calibrated_confidence={conf}; "
+            f"evidence={r['evidence_category']}; "
+            f"no_call_reason={r['no_call_reason'] or 'n/a'}; drivers=[{drivers}]")
+    return "\n".join(lines)
+
+
+def copilot_narrative(results, iso, key):
+    """Call OpenAI to narrate the structured results. Returns text or raises."""
+    from openai import OpenAI
+    client = OpenAI(api_key=key)
+    resp = client.chat.completions.create(
+        model=OPENAI_MODEL,
+        temperature=0.2,
+        max_tokens=420,
+        messages=[
+            {"role": "system", "content": COPILOT_SYSTEM},
+            {"role": "user", "content":
+                "Explain these Genome Firewall results for the treating clinician. "
+                "Do not add anything not present here.\n\n" + _copilot_context(results, iso)},
+        ])
+    return resp.choices[0].message.content.strip()
+
+
+# ---------------------------------------------------------------------------- #
+# Cohort surveillance (cached)                                                  #
+# ---------------------------------------------------------------------------- #
+@st.cache_data(show_spinner=False)
+def cohort_report(_X, _Y, _oof, _coverage):
+    """Public-health view over the whole labelled cohort: lab prevalence, model
+    verdict distribution (incl. no-call), OOD flags, and carbapenemase carriage."""
+    feats_local = list(_X.columns)
+    rows = []
+    for d in DRUGS:
+        idx = _Y.index[_Y[d].notna()]
+        Xv = _X.loc[idx].values.astype(np.int8)
+        n = len(Xv)
+        nn = np.empty(n)
+        for i in range(n):
+            diff = np.logical_xor(Xv[i], Xv).sum(axis=1).astype(float)
+            diff[i] = np.inf
+            nn[i] = diff.min()
+        tau = float(_coverage[d]["ood_tau"])
+        p = _oof[d]["p_cal"].reindex(idx).values
+        vc = {"likely_to_fail": 0, "likely_to_work": 0, "no_call": 0}
+        for i in range(n):
+            v, _, _, _ = decide(p[i], Xv[i], feats_local, d, nn[i], tau)
+            vc[v] += 1
+        rows.append({"drug": d, "n": n,
+                     "lab_resistant_pct": round(100 * float(_Y.loc[idx, d].mean()), 1),
+                     "likely_to_fail": vc["likely_to_fail"],
+                     "likely_to_work": vc["likely_to_work"],
+                     "no_call": vc["no_call"],
+                     "ood_flagged": int((nn > tau).sum())})
+    carb_cols = [c for c in _X.columns if is_carbapenemase(c)]
+    carriage = {c: int(_X[c].sum()) for c in carb_cols if int(_X[c].sum()) > 0}
+    carriage = dict(sorted(carriage.items(), key=lambda kv: -kv[1]))
+    return pd.DataFrame(rows), carriage
+
+
 # ---------------------------------------------------------------------------- #
 # App                                                                           #
 # ---------------------------------------------------------------------------- #
@@ -272,12 +385,25 @@ with st.sidebar:
 
     if mode == "Held-out isolate":
         test_isos = list(split.index[split == "test"])
-        # Deep-link support: ?iso=<id> preselects an isolate (handy for sharing
-        # a specific demo case, e.g. in the walkthrough video).
         qp_iso = st.query_params.get("iso")
-        default_ix = test_isos.index(qp_iso) if qp_iso in test_isos else 0
-        iso = st.selectbox(f"Test-split isolate ({len(test_isos)} available)",
-                           test_isos, index=default_ix)
+        # Curated showcase cases first (one per verdict type) for a clean demo.
+        show_labels = list(SHOWCASE.keys())
+        show_default = 0
+        for j, lbl in enumerate(show_labels):
+            if SHOWCASE[lbl] == qp_iso:
+                show_default = j + 1
+        pick = st.selectbox("Showcase demo cases",
+                            ["— browse full test-split list —"] + show_labels,
+                            index=show_default,
+                            help="Four hand-picked held-out isolates, one per verdict / "
+                                 "no-call type — ideal for the walkthrough video.")
+        if pick != "— browse full test-split list —":
+            iso = SHOWCASE[pick]
+        else:
+            # Deep-link support: ?iso=<id> preselects an isolate.
+            default_ix = test_isos.index(qp_iso) if qp_iso in test_isos else 0
+            iso = st.selectbox(f"Test-split isolate ({len(test_isos)} available)",
+                               test_isos, index=default_ix)
         st.query_params["iso"] = iso
         x_row = X.loc[iso].values.astype(np.int8)
 
@@ -327,8 +453,9 @@ with st.sidebar:
 
 n_present = int(x_row.sum()) if x_row is not None else 0
 
-tab_report, tab_perf, tab_about = st.tabs(
-    ["🧾 Antibiotic-response report", "📊 Held-out performance", "🔬 Methods & honesty"])
+tab_report, tab_perf, tab_surv, tab_about = st.tabs(
+    ["🧾 Antibiotic-response report", "📊 Held-out performance",
+     "📈 Surveillance", "🔬 Methods & honesty"])
 
 # ============================ REPORT TAB ==================================== #
 with tab_report:
@@ -405,6 +532,33 @@ with tab_report:
                 else:
                     st.caption("No resistance-associated genes present in this isolate.")
 
+        # ---- Clinical Copilot (optional OpenAI narrative) ----
+        st.divider()
+        st.markdown("#### 🧠 Clinical Copilot &nbsp;<span style='font-size:0.72rem;"
+                    "color:#888;font-weight:400;'>optional · OpenAI</span>",
+                    unsafe_allow_html=True)
+        key = _copilot_key()
+        if not key:
+            st.info("Set `OPENAI_API_KEY` (environment variable or "
+                    "`.streamlit/secrets.toml`) and reload to enable a plain-language "
+                    "clinician summary. The Copilot only rephrases the structured results "
+                    "above — it never makes an independent prediction.")
+        else:
+            st.caption("Turns the structured verdicts/evidence above into a clinician-facing "
+                       "narrative. The deterministic pipeline decides; the model only narrates.")
+            if st.button("Generate clinician summary", type="primary"):
+                with st.spinner(f"Composing a grounded summary ({OPENAI_MODEL})…"):
+                    try:
+                        txt = copilot_narrative(results, iso, key)
+                        st.markdown(
+                            f"<div style='border:1px solid #D5E3F0;background:#F4F8FC;"
+                            f"border-radius:10px;padding:14px 18px;'>{txt}</div>",
+                            unsafe_allow_html=True)
+                        st.caption("⚠️ Generated by OpenAI from the structured results above — "
+                                   "not an independent prediction. Confirm with standard lab AST.")
+                    except Exception as e:
+                        st.error(f"OpenAI call failed: {e}")
+
 # ============================ PERFORMANCE TAB =============================== #
 with tab_perf:
     st.subheader("Honest, leakage-free held-out performance")
@@ -440,6 +594,54 @@ with tab_perf:
         st.dataframe(cov, width="stretch")
         st.caption("Compare 'balanced acc on called' here against 'balanced acc' in the "
                    "table above — the no-call gate lifts every drug.")
+
+# ============================ SURVEILLANCE TAB ============================= #
+with tab_surv:
+    st.subheader("Public-health surveillance view")
+    st.caption("Cohort-level resistance intelligence across all labelled *K. pneumoniae* "
+               "isolates — the second half of the brief's mission: help public-health teams "
+               "see where carbapenem resistance is spreading. Aggregates only; still strictly "
+               "defensive, still confirm individual results with lab AST.")
+    cohort_df, carriage = cohort_report(X, Y, oof, coverage)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Isolates in cohort", int(len(X)))
+    k2.metric("Carry ≥1 carbapenemase",
+              int((X[[c for c in X.columns if is_carbapenemase(c)]].sum(axis=1) > 0).sum()))
+    k3.metric("Model no-call rate (mean)",
+              f"{cohort_df['no_call'].sum() / cohort_df['n'].sum() * 100:.0f}%")
+
+    st.write("")
+    cA, cB = st.columns(2, gap="large")
+    with cA:
+        st.markdown("**Lab-measured carbapenem resistance prevalence** (per drug)")
+        prev = cohort_df.set_index("drug")["lab_resistant_pct"]
+        prev.index = [DRUG_LABEL[d] for d in prev.index]
+        st.bar_chart(prev, height=260, color="#C62828")
+    with cB:
+        st.markdown("**Carbapenemase-gene carriage** across the cohort (isolate count)")
+        carr = pd.Series(carriage)
+        carr = carr[carr >= 2]  # drop ultra-rare singletons for readability
+        st.bar_chart(carr, height=260, color="#185FA5", horizontal=True)
+
+    st.markdown("**Model verdict distribution per drug** — how often the system calls "
+                "fail / works / abstains on the cohort.")
+    vd = cohort_df.set_index("drug")[["likely_to_fail", "likely_to_work", "no_call"]]
+    vd.index = [DRUG_LABEL[d] for d in vd.index]
+    vd = vd.rename(columns={"likely_to_fail": "likely to fail",
+                            "likely_to_work": "likely to work", "no_call": "no-call"})
+    st.bar_chart(vd, height=280,
+                 color=["#C62828", "#2E7D32", "#E0A100"], stack="normalize")
+
+    show = cohort_df.copy()
+    show["drug"] = [DRUG_LABEL[d] for d in show["drug"]]
+    show = show.rename(columns={
+        "n": "N (tested)", "lab_resistant_pct": "lab % resistant",
+        "likely_to_fail": "→ fail", "likely_to_work": "→ works",
+        "no_call": "→ no-call", "ood_flagged": "OOD-flagged"})
+    st.dataframe(show, hide_index=True, width="stretch")
+    st.caption("‘OOD-flagged’ = isolates whose gene profile is beyond the 95th-percentile "
+               "nearest-neighbour distance — genuinely novel bugs the model refuses to overclaim on.")
 
 # ============================ ABOUT TAB ==================================== #
 with tab_about:
