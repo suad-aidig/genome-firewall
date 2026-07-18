@@ -15,3 +15,8 @@ env/
 # Local env / secrets
 .env
 *.local
+
+# Internal / not-for-public docs (kept locally, never pushed)
+HANDOFF.md
+docs/SUBMISSION.md
+docs/challenge_brief.pdf

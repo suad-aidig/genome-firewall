@@ -1,7 +1,7 @@
 """
 Genome Firewall — Streamlit decision-support demo (Module 03 front-end).
 
-Renders the output contract from HANDOFF.md for one isolate x 4 carbapenems:
+Renders the output contract for one isolate x 4 carbapenems:
 verdict (likely_to_fail / likely_to_work / no_call), calibrated confidence
 (hidden on no_call), evidence category, driving genes, and no-call reason —
 wired to the REAL trained models via decide() and driving_genes() in
