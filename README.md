@@ -1,5 +1,12 @@
 # Genome Firewall — Klebsiella pneumoniae carbapenem panel
 
+### 🔴 [Live demo → genome-firewall-suad.streamlit.app](https://genome-firewall-suad.streamlit.app/)
+Jump straight to a showcase case:
+[KPC — all fail](https://genome-firewall-suad.streamlit.app/?iso=PDT000015892.2) ·
+[OXA-48 — model hedges](https://genome-firewall-suad.streamlit.app/?iso=PDT000130453.2) ·
+[out-of-distribution](https://genome-firewall-suad.streamlit.app/?iso=PDT000130449.2)
+<br><sub>(Free hosting — if it's asleep, the first visit takes ~20–30 s to wake.)</sub>
+
 Research prototype for Hack-Nation Challenge 06. Predicts likely-to-fail /
 likely-to-work / no-call for 4 carbapenems (doripenem, ertapenem, imipenem,
 meropenem) from AMRFinderPlus-style gene presence/absence features.
