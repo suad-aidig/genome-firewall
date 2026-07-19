@@ -29,6 +29,8 @@ from sklearn.model_selection import GroupKFold
 from sklearn.metrics import (balanced_accuracy_score, recall_score, f1_score,
                              roc_auc_score, average_precision_score, brier_score_loss)
 
+import features  # mechanism-aggregate feature engineering (see features.py)
+
 PROC = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
 ART = os.path.join(os.path.dirname(__file__), "..", "artifacts")
 DRUGS = ["doripenem", "ertapenem", "imipenem", "meropenem"]
@@ -119,7 +121,8 @@ if __name__ == "__main__":
           f"{'F1':>6}{'AUROC':>7}{'PRAUC':>7}{'Brier↓':>8}{'Brier_raw':>10}{'foldAUC':>16}")
     for d in DRUGS:
         m = Y[d].notna()
-        Xd, yd, gd = X[m], Y.loc[m, d].astype(int), G[m]
+        # Augment with mechanism aggregates (model inputs only; grouping/OOD stay raw)
+        Xd, yd, gd = features.augment_matrix(X[m]), Y.loc[m, d].astype(int), G[m]
         p_cal, p_raw, fauc = calibrated_oof(Xd, yd, gd)
         mc = metrics(yd.values, p_cal)
         braw = round(brier_score_loss(yd.values, p_raw), 3)
@@ -137,7 +140,9 @@ if __name__ == "__main__":
 
     json.dump(all_metrics, open(os.path.join(ART, "metrics.json"), "w"), indent=2)
     pd.to_pickle(oof_store, os.path.join(ART, "oof.pkl"))
-    pd.to_pickle({"models": models, "features": list(X.columns), "drugs": DRUGS},
+    pd.to_pickle({"models": models,
+                  "features": features.model_feature_names(list(X.columns)),
+                  "raw_features": list(X.columns), "drugs": DRUGS},
                  os.path.join(ART, "models.pkl"))
     print("\nsaved -> artifacts/metrics.json, oof.pkl, models.pkl")
     print("Brier↓ = calibrated (lower is better); compare to Brier_raw to see calibration effect.")

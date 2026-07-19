@@ -28,6 +28,8 @@ import matplotlib.pyplot as plt
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import balanced_accuracy_score
 
+import features  # mechanism-aggregate feature engineering (see features.py)
+
 PROC = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
 ART = os.path.join(os.path.dirname(__file__), "..", "artifacts")
 DRUGS = ["doripenem", "ertapenem", "imipenem", "meropenem"]
@@ -61,6 +63,8 @@ def driving_genes(models, feats, drug, x_row, k=5):
     for i in idx:
         if x_row[i] == 0:
             continue
+        if features.is_mechanism_feature(feats[i]):
+            continue   # engineered aggregate — the evidence layer shows real genes
         out.append({"gene": feats[i], "weight": round(float(coef[i]), 2),
                     "known_carbapenemase": is_carbapenemase(feats[i])})
         if len(out) >= k:
@@ -114,15 +118,17 @@ if __name__ == "__main__":
     print(f"{'drug':<11}{'no_call%':>9}{'balAcc(called)':>16}{'ood_tau':>9}")
     for ax, drug in zip(axes.ravel(), DRUGS):
         m = Y[drug].notna()
-        Xd = X[m]; Xv = Xd.values
+        Xd = X[m]
+        Xv_raw = Xd.values                            # raw genomic profile → OOD
+        Xv_model = features.augment_matrix(Xd).values  # model space → decide()
         y = Y.loc[m, drug].astype(int).values
         p = oof[drug]["p_cal"].reindex(Xd.index).values
-        nn = loo_nn_distance(Xv)
+        nn = loo_nn_distance(Xv_raw)
         ood_tau = float(np.percentile(nn, 95))   # novelty beyond 95th pct = OOD
 
         verdicts, cats = [], []
         for i in range(len(Xd)):
-            v, c, r, _ = decide(p[i], Xv[i], feats, drug, nn[i], ood_tau)
+            v, c, r, _ = decide(p[i], Xv_model[i], feats, drug, nn[i], ood_tau)
             verdicts.append(v); cats.append(c)
         verdicts = np.array(verdicts)
         called = verdicts != "no_call"

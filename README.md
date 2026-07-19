@@ -70,6 +70,7 @@ Deep-link a specific isolate with `?iso=<PDT id>` (handy for demo walkthroughs).
 ## Files
 ```
 src/data.py        data loading, homology grouping, leakage-free split
+src/features.py     mechanism-aggregate features (concentrate carbapenemase signal)
 src/model.py        per-drug models, nested grouped-CV calibration, metrics
 src/decisions.py    no-call logic, evidence categories, reliability plot
 src/app.py          Streamlit decision-support demo (output contract + UI)

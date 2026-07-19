@@ -23,10 +23,12 @@ import os, sys, json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 
 # Import the decision layer (ground truth for the science) --------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from decisions import prob, decide, driving_genes, is_carbapenemase, DRUGS
+import features  # mechanism-aggregate feature engineering (see features.py)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROC = os.path.join(HERE, "..", "data", "processed")
@@ -35,16 +37,25 @@ ART = os.path.join(HERE, "..", "artifacts")
 SPECIES = "Klebsiella pneumoniae"
 DRUG_LABEL = {d: d.capitalize() for d in DRUGS}
 
+# ---------------------------------------------------------------------------- #
+# Design tokens — one place, referenced by both CSS and inline styles           #
+# ---------------------------------------------------------------------------- #
+INK = "#16202C"
+MUTED = "#5B6675"
+FAINT = "#8A94A3"
+BORDER = "#E6E9EF"
+PRIMARY = "#1E5FA8"
+
 # Verdict presentation ---------------------------------------------------------
 VERDICT_UI = {
-    "likely_to_fail": {"label": "LIKELY TO FAIL", "color": "#C62828",
-                       "bg": "#FDECEA", "emoji": "🔴",
+    "likely_to_fail": {"label": "LIKELY TO FAIL", "short": "Fail",
+                       "accent": "#C0392B", "bg": "#FBEAE8", "border": "#E7B7B0",
                        "gloss": "Resistance predicted — this drug is likely ineffective."},
-    "likely_to_work": {"label": "LIKELY TO WORK", "color": "#2E7D32",
-                       "bg": "#E9F5EA", "emoji": "🟢",
+    "likely_to_work": {"label": "LIKELY TO WORK", "short": "Works",
+                       "accent": "#1E8E4E", "bg": "#E7F5EC", "border": "#A8D9BC",
                        "gloss": "Susceptibility predicted — this drug is likely effective."},
-    "no_call":        {"label": "NO CALL", "color": "#B36B00",
-                       "bg": "#FFF6E5", "emoji": "🟡",
+    "no_call":        {"label": "NO CALL", "short": "No call",
+                       "accent": "#B5760B", "bg": "#FBF2DE", "border": "#EAD199",
                        "gloss": "Evidence too weak or unlike training data — abstaining on purpose."},
 }
 EVIDENCE_UI = {
@@ -63,6 +74,152 @@ NOCALL_REASON_UI = {
     "out_of_distribution": "Out of distribution — gene profile is unlike anything in training.",
     "conflicting_evidence": "Conflicting evidence — a known carbapenemase is present but the model leans 'works'.",
 }
+
+
+# ---------------------------------------------------------------------------- #
+# Global styling — makes Streamlit read like a designed product                 #
+# ---------------------------------------------------------------------------- #
+def inject_css():
+    st.markdown(f"""
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+      :root {{
+        --ink:{INK}; --muted:{MUTED}; --faint:{FAINT};
+        --border:{BORDER}; --primary:{PRIMARY};
+      }}
+
+      html, body, .stApp, [class*="css"] {{
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: var(--ink);
+      }}
+      .stApp {{ background:#FBFCFE; }}
+
+      /* Tighten the fold: pull content up, cap width for a designed feel */
+      .block-container, [data-testid="stMainBlockContainer"] {{
+        padding-top: 1.6rem; padding-bottom: 3rem;
+        max-width: 1200px;
+      }}
+      /* Hide the default Streamlit chrome for a cleaner capture — but the header
+         is fixed/out-of-flow, so we DON'T collapse its height (that clips the
+         sidebar expand button). Just make it transparent and click-through. */
+      [data-testid="stHeader"] {{ background: transparent; pointer-events: none; }}
+      /* Hide only the Deploy button / menu — NOT the whole toolbar, which also
+         contains the sidebar expand button. */
+      [data-testid="stAppDeployButton"], [data-testid="stToolbarActions"],
+      [data-testid="stDecoration"] {{ display: none; }}
+      #MainMenu, footer {{ visibility: hidden; }}
+
+      /* Keep the collapse / expand sidebar controls reachable and visible */
+      [data-testid="stExpandSidebarButton"],
+      [data-testid="stExpandSidebarButton"] button,
+      [data-testid="stSidebarCollapseButton"],
+      [data-testid="stSidebarCollapseButton"] button {{
+        pointer-events: auto !important; visibility: visible !important;
+        opacity: 1 !important; z-index: 1002 !important;
+      }}
+      [data-testid="stExpandSidebarButton"] button {{
+        background:#fff; border:1px solid var(--border);
+        box-shadow:0 2px 10px rgba(20,32,44,0.10);
+      }}
+
+      /* Source selector (segmented control) fills the sidebar width */
+      [data-testid="stSidebar"] [data-testid="stSegmentedControl"] {{ width:100%; }}
+      [data-testid="stSidebar"] [data-testid="stSegmentedControl"] > div {{
+        display:flex; flex-wrap:wrap; gap:6px; }}
+      [data-testid="stSidebar"] [data-testid="stSegmentedControl"] button {{ flex:1 1 46%; }}
+
+      h1,h2,h3,h4 {{ letter-spacing:-0.01em; }}
+
+      /* Sidebar */
+      [data-testid="stSidebar"] {{ background:#F5F7FA; border-right:1px solid var(--border); }}
+      [data-testid="stSidebar"] .stRadio label,
+      [data-testid="stSidebar"] label {{ font-size:0.86rem; }}
+
+      /* Tabs → clean underlined segmented row */
+      [data-testid="stTabs"] [data-baseweb="tab-list"] {{ gap: 6px; border-bottom:1px solid var(--border); }}
+      [data-testid="stTabs"] [data-baseweb="tab"] {{
+        font-size:0.92rem; font-weight:600; color:var(--muted);
+        padding: 8px 14px; border-radius:8px 8px 0 0;
+      }}
+      [data-testid="stTabs"] [aria-selected="true"] {{ color:var(--primary); }}
+
+      /* ---- Header ---- */
+      .gf-header {{ display:flex; align-items:center; gap:14px; margin:2px 0 14px 0; }}
+      .gf-logo {{
+        width:46px; height:46px; border-radius:12px; flex:0 0 auto;
+        display:flex; align-items:center; justify-content:center; font-size:1.5rem;
+        background:linear-gradient(135deg,#1E5FA8,#123E70);
+        box-shadow:0 4px 14px rgba(30,95,168,0.28);
+      }}
+      .gf-title {{ font-size:1.62rem; font-weight:800; line-height:1.05; }}
+      .gf-subtitle {{ font-size:0.9rem; color:var(--muted); margin-top:2px; }}
+
+      /* ---- Disclaimer notice (present, legible, not screaming) ---- */
+      .gf-notice {{
+        display:flex; gap:11px; align-items:flex-start;
+        background:#FFF7F3; border:1px solid #F1CDBE; border-left:4px solid #C0392B;
+        border-radius:10px; padding:11px 15px; font-size:0.85rem; line-height:1.45;
+        color:#5A3A31; margin-bottom:16px;
+      }}
+      .gf-notice b {{ color:#8A2A1C; }}
+
+      /* ---- Context strip ---- */
+      .gf-context {{ font-size:0.9rem; color:var(--muted); margin:2px 0 14px 0; }}
+      .gf-context code {{ font-family:'JetBrains Mono',monospace; background:#EEF2F7;
+        padding:1px 7px; border-radius:6px; color:var(--ink); font-size:0.84rem; }}
+      .gf-tag {{ background:#EEF3FB; color:#274C86; padding:2px 9px; border-radius:20px;
+        font-size:0.74rem; font-weight:600; }}
+
+      /* ---- Hero (leads with the answer) ---- */
+      .gf-hero {{ border-radius:16px; padding:20px 22px 18px; margin-bottom:20px;
+        border:1px solid var(--border); box-shadow:0 6px 24px rgba(20,32,44,0.06); }}
+      .gf-hero__eyebrow {{ font-size:0.72rem; font-weight:700; letter-spacing:0.09em;
+        text-transform:uppercase; color:var(--faint); }}
+      .gf-hero__headline {{ font-size:1.5rem; font-weight:800; line-height:1.15;
+        margin:5px 0 4px; }}
+      .gf-hero__sub {{ font-size:0.92rem; color:var(--muted); line-height:1.45; }}
+      .gf-hero__foot {{ margin-top:14px; font-size:0.8rem; color:var(--muted);
+        display:flex; align-items:center; gap:7px; border-top:1px dashed var(--border);
+        padding-top:11px; }}
+
+      /* ---- Summary strip pills ---- */
+      .gf-strip {{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:16px; }}
+      .gf-pill {{ border-radius:12px; padding:11px 13px; border:1px solid var(--border);
+        background:#fff; }}
+      .gf-pill__drug {{ font-size:0.7rem; font-weight:700; letter-spacing:0.05em;
+        text-transform:uppercase; color:var(--faint); }}
+      .gf-pill__verdict {{ display:flex; align-items:center; gap:7px; font-weight:700;
+        font-size:0.98rem; margin-top:4px; }}
+      .gf-pill__conf {{ font-size:0.78rem; color:var(--muted); margin-top:2px;
+        font-variant-numeric:tabular-nums; }}
+      .gf-dot {{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; }}
+
+      /* ---- Drug cards ---- */
+      .gf-card {{ border:1px solid var(--border); border-radius:14px; padding:16px 18px;
+        background:#fff; height:100%; box-shadow:0 2px 10px rgba(20,32,44,0.04); }}
+      .gf-card__top {{ display:flex; justify-content:space-between; align-items:center; }}
+      .gf-card__drug {{ font-size:1.15rem; font-weight:800; }}
+      .gf-badge {{ display:inline-flex; align-items:center; gap:6px; font-size:0.72rem;
+        font-weight:800; letter-spacing:0.03em; padding:4px 10px; border-radius:20px; }}
+      .gf-gloss {{ font-size:0.83rem; color:var(--muted); margin-top:5px; }}
+      .gf-conf__row {{ display:flex; justify-content:space-between; font-size:0.75rem;
+        color:var(--faint); margin:12px 0 4px; }}
+      .gf-conf__track {{ background:#EDF0F4; border-radius:6px; height:8px; overflow:hidden; }}
+      .gf-conf__fill {{ height:8px; border-radius:6px; }}
+      .gf-evtag {{ display:inline-block; padding:3px 10px; border-radius:20px;
+        font-size:0.73rem; font-weight:600; margin-top:11px; border:1px solid; }}
+      .gf-why {{ margin-top:9px; font-size:0.8rem; color:#8a5a00; }}
+      .gf-drivers {{ margin-top:12px; font-size:0.76rem; color:var(--muted); }}
+      .gf-gene {{ display:inline-block; font-family:'JetBrains Mono',monospace;
+        background:#F6F8FB; border:1px solid var(--border); border-radius:7px;
+        padding:2px 7px; margin:4px 4px 0 0; font-size:0.72rem; }}
+      .gf-gene .w {{ color:var(--faint); }}
+
+      /* ---- Ground-truth line ---- */
+      .gf-truth {{ font-size:0.78rem; color:var(--muted); margin-top:8px; }}
+    </style>
+    """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------- #
@@ -112,22 +269,27 @@ def nn_distance(x_row: np.ndarray, ref_vals: np.ndarray, exclude_pos=None) -> fl
 
 
 def predict(x_row, drug, oof, store, feats, ref, iso=None):
-    """One isolate x drug → the full output-contract object."""
+    """One isolate x drug → the full output-contract object.
+
+    `x_row` is the RAW genomic profile (aligned to store['raw_features']). The OOD
+    nearest-neighbour test runs on it directly; the model / decision layer run on
+    the mechanism-augmented row."""
     models = store["models"]
+    x_model = features.augment_row(x_row, store["raw_features"])
     tested = iso is not None and iso in oof[drug].index
     if tested:
         p = float(oof[drug].loc[iso, "p_cal"])   # honest out-of-fold probability
         p_source = "held_out"
         exclude = ref[drug]["pos"].get(iso)
     else:
-        p = prob(models, feats, drug, x_row)       # final model on a novel row
+        p = prob(models, feats, drug, x_model)     # final model on a novel row
         p_source = "model"
         exclude = None
 
-    nn = nn_distance(x_row, ref[drug]["vals"], exclude_pos=exclude)
+    nn = nn_distance(x_row, ref[drug]["vals"], exclude_pos=exclude)   # raw profile
     verdict, cat, reason, present_carb = decide(
-        p, x_row, feats, drug, nn, ref[drug]["ood_tau"])
-    genes = driving_genes(models, feats, drug, x_row, k=5)
+        p, x_model, feats, drug, nn, ref[drug]["ood_tau"])
+    genes = driving_genes(models, feats, drug, x_model, k=5)
 
     confidence = None
     if verdict == "likely_to_fail":
@@ -147,68 +309,136 @@ def predict(x_row, drug, oof, store, feats, ref, iso=None):
 # ---------------------------------------------------------------------------- #
 # Rendering                                                                     #
 # ---------------------------------------------------------------------------- #
-def render_banner():
+def render_header():
     st.markdown(
-        """
-        <div style="background:#B3261E;color:#fff;padding:14px 18px;border-radius:10px;
-             font-size:0.98rem;line-height:1.45;">
-          <b>⚠️ Research prototype — decision support only.</b>
-          Every antibiotic-response result <b>must be confirmed by standard laboratory
-          testing</b>. This tool predicts and explains resistance that already exists; it
-          never designs or modifies organisms and never makes a treatment decision on its own.
+        f"""
+        <div class="gf-header">
+          <div class="gf-logo">🧬</div>
+          <div>
+            <div class="gf-title">Genome Firewall</div>
+            <div class="gf-subtitle">Genome-to-antibiotic-response decision support
+              · <i>{SPECIES}</i> · carbapenem panel</div>
+          </div>
         </div>
         """, unsafe_allow_html=True)
 
 
-def _conf_bar(confidence: float, color: str) -> str:
-    pct = int(round(confidence * 100))
-    return f"""
-      <div style="margin:8px 0 4px 0;">
-        <div style="display:flex;justify-content:space-between;font-size:0.78rem;
-             color:#555;margin-bottom:3px;">
-          <span>calibrated confidence</span><span><b>{pct}%</b></span>
+def render_banner():
+    st.markdown(
+        """
+        <div class="gf-notice">
+          <span style="font-size:1rem;line-height:1.2;">⚠️</span>
+          <span><b>Research prototype — decision support only.</b> Every antibiotic-response
+          result must be confirmed by standard laboratory testing. This tool predicts and
+          explains resistance that already exists; it never designs or modifies organisms
+          and never makes a treatment decision on its own.</span>
         </div>
-        <div style="background:#ECECEC;border-radius:6px;height:9px;overflow:hidden;">
-          <div style="width:{pct}%;background:{color};height:9px;"></div>
+        """, unsafe_allow_html=True)
+
+
+def render_hero(results: list[dict]):
+    """The answer, first. Overall panel read + a four-drug at-a-glance strip."""
+    works = [r for r in results if r["verdict"] == "likely_to_work"]
+    fails = [r for r in results if r["verdict"] == "likely_to_fail"]
+    ncs = [r for r in results if r["verdict"] == "no_call"]
+
+    def names(rs):
+        return ", ".join(DRUG_LABEL[r["drug"]] for r in rs)
+
+    if works:
+        best = max(works, key=lambda r: r["confidence"])
+        ui = VERDICT_UI["likely_to_work"]
+        headline = (f"Best-supported option: {DRUG_LABEL[best['drug']]}"
+                    f" &middot; {int(best['confidence']*100)}% confidence it works")
+        bits = []
+        if fails:
+            bits.append(f"{len(fails)} likely to fail ({names(fails)})")
+        if ncs:
+            bits.append(f"{len(ncs)} no-call ({names(ncs)})")
+        sub = ("The system supports a specific carbapenem here. "
+               + ("; ".join(bits) + "." if bits else ""))
+    elif not fails:  # everything is a no-call
+        ui = VERDICT_UI["no_call"]
+        headline = "The system abstains on the whole carbapenem panel"
+        sub = ("Evidence is weak, conflicting, or out of distribution — this is <b>not</b> a "
+               "resistance prediction. Escalate to standard lab testing.")
+    else:
+        ui = VERDICT_UI["likely_to_fail"]
+        headline = "No carbapenem is predicted to work"
+        extra = (f" The remaining {len(ncs)} are no-calls (deliberate abstentions, not "
+                 f"resistance predictions)." if ncs else "")
+        sub = (f"{len(fails)} likely to fail ({names(fails)}) — this pattern suggests "
+               f"carbapenem resistance. Consider non-carbapenem options with an "
+               f"infectious-disease specialist.{extra}")
+
+    accent, bg, border = ui["accent"], ui["bg"], ui["border"]
+
+    # four-drug strip
+    pills = []
+    for r in results:
+        p_ui = VERDICT_UI[r["verdict"]]
+        conf = (f"{int(r['confidence']*100)}% confidence"
+                if r["confidence"] is not None else "confidence withheld")
+        pills.append(
+            f"""<div class="gf-pill" style="border-color:{p_ui['border']};background:{p_ui['bg']}55;">
+                  <div class="gf-pill__drug">{DRUG_LABEL[r['drug']]}</div>
+                  <div class="gf-pill__verdict" style="color:{p_ui['accent']};">
+                    <span class="gf-dot" style="background:{p_ui['accent']};"></span>{p_ui['short']}</div>
+                  <div class="gf-pill__conf">{conf}</div>
+                </div>""")
+
+    st.markdown(
+        f"""
+        <div class="gf-hero" style="background:linear-gradient(180deg,{bg}88,#ffffff);
+             border-color:{border};">
+          <div class="gf-hero__eyebrow" style="color:{accent};">Panel read</div>
+          <div class="gf-hero__headline">{headline}</div>
+          <div class="gf-hero__sub">{sub}</div>
+          <div class="gf-strip">{''.join(pills)}</div>
+          <div class="gf-hero__foot">⚑ Confirm with standard laboratory AST before any
+            treatment decision.</div>
         </div>
-      </div>"""
+        """, unsafe_allow_html=True)
 
 
 def render_card(r: dict):
     ui = VERDICT_UI[r["verdict"]]
-    ev_label, ev_help = EVIDENCE_UI[r["evidence_category"]]
+    ev_label, _ = EVIDENCE_UI[r["evidence_category"]]
+    accent = ui["accent"]
 
     parts = [f"""
-      <div style="border:1px solid #E3E3E3;border-left:6px solid {ui['color']};
-           border-radius:12px;padding:16px 18px;background:{ui['bg']};height:100%;">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;">
-          <span style="font-size:1.18rem;font-weight:700;color:#1a1a1a;">{DRUG_LABEL[r['drug']]}</span>
-          <span style="font-size:0.82rem;font-weight:800;letter-spacing:0.4px;
-                color:{ui['color']};">{ui['emoji']} {ui['label']}</span>
+      <div class="gf-card" style="border-top:3px solid {accent};">
+        <div class="gf-card__top">
+          <span class="gf-card__drug">{DRUG_LABEL[r['drug']]}</span>
+          <span class="gf-badge" style="color:{accent};background:{ui['bg']};">
+            <span class="gf-dot" style="background:{accent};"></span>{ui['label']}</span>
         </div>
-        <div style="font-size:0.82rem;color:#444;margin-top:4px;">{ui['gloss']}</div>
+        <div class="gf-gloss">{ui['gloss']}</div>
     """]
 
+    # confidence bar (hidden on no-call, by design)
     if r["confidence"] is not None:
-        parts.append(_conf_bar(r["confidence"], ui["color"]))
-    else:
+        pct = int(round(r["confidence"] * 100))
         parts.append(
-            f"<div style='margin:8px 0;font-size:0.8rem;color:#8a5a00;'>"
-            f"<i>Confidence intentionally hidden on a no-call.</i></div>")
+            f"""<div class="gf-conf__row"><span>calibrated confidence</span>
+                 <span style="color:{accent};font-weight:700;">{pct}%</span></div>
+                <div class="gf-conf__track"><div class="gf-conf__fill"
+                 style="width:{pct}%;background:{accent};"></div></div>""")
+    else:
+        parts.append("<div class='gf-why' style='margin-top:11px;'>"
+                     "<i>Confidence intentionally hidden on a no-call.</i></div>")
 
     # evidence tag
     parts.append(
-        f"<div style='margin-top:6px;'><span style='background:#fff;border:1px solid "
-        f"{ui['color']}55;color:{ui['color']};padding:2px 9px;border-radius:20px;"
-        f"font-size:0.74rem;font-weight:600;'>{ev_label}</span></div>")
+        f"<div><span class='gf-evtag' style='color:{accent};border-color:{accent}55;'>"
+        f"{ev_label}</span></div>")
 
     # no-call reason
     if r["no_call_reason"]:
-        parts.append(
-            f"<div style='margin-top:8px;font-size:0.8rem;color:#8a5a00;'>"
-            f"<b>Why no call:</b> {NOCALL_REASON_UI[r['no_call_reason']]}</div>")
+        parts.append(f"<div class='gf-why'><b>Why no call:</b> "
+                     f"{NOCALL_REASON_UI[r['no_call_reason']]}</div>")
 
-    # driving genes one-liner
+    # driving genes
     genes = r["driving_features"]
     if genes:
         chips = []
@@ -216,17 +446,14 @@ def render_card(r: dict):
             star = " ⚑" if g["known_carbapenemase"] else ""
             sign = "+" if g["weight"] >= 0 else "−"
             chips.append(
-                f"<span style='background:#fff;border:1px solid #ddd;border-radius:6px;"
-                f"padding:1px 6px;margin:2px 3px 0 0;display:inline-block;font-size:0.72rem;"
-                f"font-family:monospace;'>{g['gene']} "
-                f"<span style='color:#888;'>({sign}{abs(g['weight'])}){star}</span></span>")
+                f"<span class='gf-gene'>{g['gene']} "
+                f"<span class='w'>({sign}{abs(g['weight'])}){star}</span></span>")
         parts.append(
-            f"<div style='margin-top:10px;font-size:0.76rem;color:#555;'>"
-            f"<b>Top drivers</b> (signed weight; ⚑ = known carbapenemase):<br>{''.join(chips)}</div>")
+            "<div class='gf-drivers'><b>Top drivers</b> "
+            "(signed weight; ⚑ = known carbapenemase)<br>" + "".join(chips) + "</div>")
     else:
-        parts.append(
-            "<div style='margin-top:10px;font-size:0.76rem;color:#777;'>"
-            "<b>Top drivers:</b> no resistance-associated genes present.</div>")
+        parts.append("<div class='gf-drivers'><b>Top drivers:</b> "
+                     "no resistance-associated genes present.</div>")
 
     parts.append("</div>")
     st.markdown("".join(parts), unsafe_allow_html=True)
@@ -236,19 +463,19 @@ def render_true_label(true_label, p_source):
     if true_label is None:
         return ""
     truth = "Resistant (drug failed)" if int(true_label) == 1 else "Susceptible (drug worked)"
-    tcolor = "#C62828" if int(true_label) == 1 else "#2E7D32"
+    tcolor = "#C0392B" if int(true_label) == 1 else "#1E8E4E"
     src = ("held-out out-of-fold — this isolate's label was never used to score it"
            if p_source == "held_out" else "reference label")
-    return (f"<span style='font-size:0.78rem;color:#444;'>Lab AST ground truth: "
+    return (f"<div class='gf-truth'>Lab AST ground truth: "
             f"<b style='color:{tcolor};'>{truth}</b> "
-            f"<span style='color:#999;'>({src})</span></span>")
+            f"<span style='color:{FAINT};'>({src})</span></div>")
 
 
 # Curated demo cases — one per verdict/no-call type, for a clean walkthrough.
 SHOWCASE = {
     "🟢 Susceptible — all carbapenems likely to work · PDT000022731.1": "PDT000022731.1",
     "🔴 KPC-3 carbapenemase — all likely to fail · PDT000015892.2": "PDT000015892.2",
-    "🟡 KPC present but conflicting — honest no-call · PDT000016131.2": "PDT000016131.2",
+    "🟡 OXA-48 weak carbapenemase — model hedges where the rule can't · PDT000130453.2": "PDT000130453.2",
     "🟡 Out-of-distribution — novelty no-call · PDT000130449.2": "PDT000130449.2",
 }
 
@@ -357,53 +584,101 @@ def cohort_report(_X, _Y, _oof, _coverage):
     return pd.DataFrame(rows), carriage
 
 
+@st.cache_data(show_spinner=False)
+def rule_baseline(_X, _Y, _oof):
+    """Does the model earn its place over a one-line rule ('any known
+    carbapenemase present -> resistant')? Compares balanced accuracy of the
+    calibrated model vs. the rule on the same leakage-free out-of-fold
+    predictions, and quantifies the model's value on carbapenemase-NEGATIVE
+    isolates (where the rule is blind: it predicts 'susceptible' for all)."""
+    carb_cols = [c for c in _X.columns if is_carbapenemase(c)]
+    has_carb = (_X[carb_cols].sum(axis=1) > 0).astype(int)
+    rows, missed_tot, caught_tot = [], 0, 0
+    for d in DRUGS:
+        o = _oof[d]
+        idx = o.index
+        y = o["y"].values.astype(int)
+        p = o["p_cal"].values
+        rule = has_carb.reindex(idx).values
+        neg = rule == 0                                  # no known carbapenemase
+        y_neg = y[neg]
+        sub_auroc = (roc_auc_score(y_neg, p[neg])
+                     if len(np.unique(y_neg)) == 2 else float("nan"))
+        missed = int(((y == 1) & neg).sum())             # rule misses these
+        caught = int(((y == 1) & neg & (p >= 0.5)).sum())  # model still flags
+        missed_tot += missed
+        caught_tot += caught
+        rows.append({
+            "drug": d,
+            "model_bacc": round(balanced_accuracy_score(y, (p >= 0.5).astype(int)), 3),
+            "rule_bacc": round(balanced_accuracy_score(y, rule), 3),
+            "auroc": round(roc_auc_score(y, p), 3),
+            "cryptic_n": int(neg.sum()),
+            "cryptic_resistant": int(y_neg.sum()),
+            "cryptic_auroc": round(sub_auroc, 3) if sub_auroc == sub_auroc else None,
+            "rule_missed": missed,
+            "model_caught": caught,
+        })
+    return pd.DataFrame(rows), missed_tot, caught_tot
+
+
 # ---------------------------------------------------------------------------- #
 # App                                                                           #
 # ---------------------------------------------------------------------------- #
 st.set_page_config(page_title="Genome Firewall", page_icon="🧬", layout="wide")
+inject_css()
 
 X, Y, split, oof, store, feats, coverage, metrics, ref = load_all()
-fidx = {f: i for i, f in enumerate(feats)}
+# User input maps to the RAW genomic features; mechanism aggregates are derived.
+raw_feats = store["raw_features"]
+fidx = {f: i for i, f in enumerate(raw_feats)}
 
-st.markdown(
-    "<h1 style='margin-bottom:0;'>🧬 Genome Firewall</h1>"
-    f"<div style='color:#555;margin-top:2px;'>Genome-to-antibiotic-response decision "
-    f"support · <i>{SPECIES}</i> · 4 carbapenems</div>", unsafe_allow_html=True)
-st.write("")
+render_header()
 render_banner()
-st.write("")
 
 # ---- Sidebar: isolate input ----
+SOURCE_MODES = ["Showcase case", "Held-out isolate", "Paste gene calls",
+                "Upload row (CSV)"]
 with st.sidebar:
     st.header("Isolate input")
-    mode = st.radio(
-        "Source", ["Held-out isolate", "Paste gene calls", "Upload row (CSV)"],
-        help="Held-out isolates are drawn from the grouped test split — the model "
-             "never saw their genetic group during training.")
+
+    # A deep-link (?iso=…) to a non-showcase test isolate should land on the
+    # matching source mode, so any shared URL reopens exactly what it points to.
+    qp_iso = st.query_params.get("iso")
+    mode_default = 0
+    if qp_iso and qp_iso not in SHOWCASE.values() and qp_iso in split.index:
+        mode_default = 1
+
+    SHORT = {"Showcase case": "Showcase", "Held-out isolate": "Held-out",
+             "Paste gene calls": "Paste genes", "Upload row (CSV)": "Upload CSV"}
+    mode = st.segmented_control(
+        "Source", SOURCE_MODES, default=SOURCE_MODES[mode_default],
+        format_func=lambda m: SHORT[m], selection_mode="single",
+        help="**Showcase** — four hand-picked held-out isolates, one per verdict / no-call "
+             "type (the clean walkthrough). **Held-out** — any grouped test-split isolate "
+             "the model never trained on. **Paste / Upload** — score a novel gene-call row.")
+    if mode is None:                    # single-select allows deselect → keep a mode
+        mode = SOURCE_MODES[mode_default]
 
     x_row, iso, custom = None, None, False
 
-    if mode == "Held-out isolate":
-        test_isos = list(split.index[split == "test"])
-        qp_iso = st.query_params.get("iso")
-        # Curated showcase cases first (one per verdict type) for a clean demo.
+    if mode == "Showcase case":
         show_labels = list(SHOWCASE.keys())
-        show_default = 0
+        default_ix = 0
         for j, lbl in enumerate(show_labels):
             if SHOWCASE[lbl] == qp_iso:
-                show_default = j + 1
-        pick = st.selectbox("Showcase demo cases",
-                            ["— browse full test-split list —"] + show_labels,
-                            index=show_default,
-                            help="Four hand-picked held-out isolates, one per verdict / "
-                                 "no-call type — ideal for the walkthrough video.")
-        if pick != "— browse full test-split list —":
-            iso = SHOWCASE[pick]
-        else:
-            # Deep-link support: ?iso=<id> preselects an isolate.
-            default_ix = test_isos.index(qp_iso) if qp_iso in test_isos else 0
-            iso = st.selectbox(f"Test-split isolate ({len(test_isos)} available)",
-                               test_isos, index=default_ix)
+                default_ix = j
+        pick = st.selectbox("Curated demo cases", show_labels, index=default_ix,
+                            help="One isolate per verdict type — the clean walkthrough path.")
+        iso = SHOWCASE[pick]
+        st.query_params["iso"] = iso
+        x_row = X.loc[iso].values.astype(np.int8)
+
+    elif mode == "Held-out isolate":
+        test_isos = list(split.index[split == "test"])
+        default_ix = test_isos.index(qp_iso) if qp_iso in test_isos else 0
+        iso = st.selectbox(f"Test-split isolate ({len(test_isos)} available)",
+                           test_isos, index=default_ix)
         st.query_params["iso"] = iso
         x_row = X.loc[iso].values.astype(np.int8)
 
@@ -415,7 +690,7 @@ with st.sidebar:
                              "gyrA_S83I=POINT", "fosA=COMPLETE"])
         txt = st.text_area("Gene calls", value=example, height=170)
         tokens = [t.strip() for t in txt.replace(",", "\n").splitlines() if t.strip()]
-        x_row = np.zeros(len(feats), dtype=np.int8)
+        x_row = np.zeros(len(raw_feats), dtype=np.int8)
         matched = [t for t in tokens if t in fidx]
         for t in matched:
             x_row[fidx[t]] = 1
@@ -426,7 +701,7 @@ with st.sidebar:
         st.caption("Upload a CSV that is EITHER one row over the 324 model features, "
                    "OR a single column listing the present gene tokens.")
         up = st.file_uploader("CSV file", type=["csv"])
-        x_row = np.zeros(len(feats), dtype=np.int8)
+        x_row = np.zeros(len(raw_feats), dtype=np.int8)
         if up is not None:
             df = pd.read_csv(up)
             overlap = [c for c in df.columns if c in fidx]
@@ -442,7 +717,7 @@ with st.sidebar:
                     x_row[fidx[t]] = 1
                 st.caption(f"✅ read gene list · matched {len(m)} / {len(toks)} tokens")
         else:
-            st.info("Upload a file, or switch to a held-out isolate to explore.")
+            st.info("Upload a file, or switch to a showcase case to explore.")
 
     st.divider()
     st.markdown(
@@ -462,60 +737,35 @@ with tab_report:
     if x_row is None or (custom and n_present == 0):
         st.info("Provide an isolate on the left to generate a report.")
     else:
-        # header line
+        # context line
         who = iso if iso else "Pasted / uploaded isolate"
         badge = ("held-out (grouped test split)" if iso and split.get(iso) == "test"
                  else "novel input" if custom else "dataset isolate")
         st.markdown(
-            f"**Isolate:** `{who}` &nbsp;·&nbsp; **{n_present}** resistance-relevant "
-            f"gene calls present &nbsp;·&nbsp; <span style='background:#EEF2FF;color:#3730A3;"
-            f"padding:1px 8px;border-radius:12px;font-size:0.75rem;'>{badge}</span>",
+            f"<div class='gf-context'><b>Isolate</b> <code>{who}</code> &nbsp;·&nbsp; "
+            f"<b>{n_present}</b> resistance-relevant gene calls present &nbsp;·&nbsp; "
+            f"<span class='gf-tag'>{badge}</span></div>",
             unsafe_allow_html=True)
-        st.write("")
 
         results = [predict(x_row, d, oof, store, feats, ref, iso=iso) for d in DRUGS]
 
+        # 1) the answer, first
+        render_hero(results)
+
+        # 2) per-drug detail
+        st.markdown("<div style='font-size:0.82rem;font-weight:700;color:#5B6675;"
+                    "letter-spacing:0.05em;text-transform:uppercase;margin:4px 0 10px;'>"
+                    "Per-drug detail</div>", unsafe_allow_html=True)
         cols = st.columns(2, gap="medium")
         for i, r in enumerate(results):
             with cols[i % 2]:
                 render_card(r)
-                # ground-truth line for dataset isolates
                 if iso is not None:
                     tl = Y.loc[iso, r["drug"]] if iso in Y.index else np.nan
                     if not pd.isna(tl):
                         st.markdown(render_true_label(tl, r["p_source"]),
                                     unsafe_allow_html=True)
                 st.write("")
-
-        # panel-level recommendation
-        works = [r for r in results if r["verdict"] == "likely_to_work"]
-        fails = [r for r in results if r["verdict"] == "likely_to_fail"]
-        ncs = [r for r in results if r["verdict"] == "no_call"]
-        st.divider()
-        if works:
-            best = max(works, key=lambda r: r["confidence"])
-            others = ""
-            if fails:
-                others = (f" {len(fails)} carbapenem(s) look likely to fail "
-                          f"({', '.join(DRUG_LABEL[r['drug']] for r in fails)}).")
-            st.success(
-                f"**Panel read:** best-supported carbapenem is "
-                f"**{DRUG_LABEL[best['drug']]}** "
-                f"({int(best['confidence']*100)}% calibrated confidence it works).{others} "
-                f"Confirm with standard lab AST before acting.")
-        elif not fails:  # everything is a no-call
-            st.warning("**Panel read:** the system abstains on the whole carbapenem panel "
-                       "for this isolate — evidence is weak, conflicting, or out of distribution. "
-                       "This is not a resistance prediction; escalate to standard lab testing.")
-        else:
-            nc_note = (f" The remaining {len(ncs)} are no-calls (abstentions, not "
-                       f"resistance predictions)." if ncs else "")
-            st.error(
-                f"**Panel read:** no carbapenem is predicted to work. "
-                f"{len(fails)} likely to fail "
-                f"({', '.join(DRUG_LABEL[r['drug']] for r in fails)}) — these suggest "
-                f"carbapenem resistance; confirm urgently with lab AST and consider "
-                f"non-carbapenem options with an infectious-disease specialist.{nc_note}")
 
         with st.expander("See the full driving-gene evidence for every drug"):
             for r in results:
@@ -576,6 +826,61 @@ with tab_perf:
     mdf.index = [DRUG_LABEL[d] for d in mdf.index]
     st.dataframe(mdf, width="stretch")
 
+    # Stability + calibration effect — computed in model.py, surfaced here.
+    stab = pd.DataFrame(metrics).T
+    stab = pd.DataFrame({
+        "AUROC (fold μ ± σ)": [f"{stab.loc[d, 'fold_auroc_mean']:.2f} ± "
+                               f"{stab.loc[d, 'fold_auroc_std']:.2f}" for d in DRUGS],
+        "Brier (calibrated)": [f"{stab.loc[d, 'brier']:.3f}" for d in DRUGS],
+        "Brier (uncalibrated)": [f"{stab.loc[d, 'brier_uncalibrated']:.3f}" for d in DRUGS],
+    }, index=[DRUG_LABEL[d] for d in DRUGS])
+    st.dataframe(stab, width="stretch")
+    st.caption("Left: fold-to-fold AUROC spread across the outer CV folds — a stability "
+               "check, not a single lucky split. Right: the Platt calibrator's effect on "
+               "the Brier score (lower is better).")
+
+    # ---- Does the model earn its place over a one-line rule? ----
+    st.divider()
+    st.markdown("#### Does the model earn its place?")
+    st.caption("Carbapenem resistance in *K. pneumoniae* is dominated by carbapenemase "
+               "carriage, so a one-line rule — *any known carbapenemase present → resistant* "
+               "— is a strong baseline. An honest project has to show what the model adds "
+               "beyond it.")
+    bdf, missed_tot, caught_tot = rule_baseline(X, Y, oof)
+    comp = pd.DataFrame({
+        "model balanced acc": bdf["model_bacc"].values,
+        "rule balanced acc": bdf["rule_bacc"].values,
+        "model AUROC": bdf["auroc"].values,
+    }, index=[DRUG_LABEL[d] for d in bdf["drug"]])
+    cc1, cc2 = st.columns([1, 1], gap="large")
+    with cc1:
+        st.markdown("**Model vs. mechanism-rule baseline**")
+        st.dataframe(comp, width="stretch")
+        st.caption("The calibrated model **matches the rule within fold-to-fold noise** "
+                   "(± ~0.03–0.08) — while the rule gives only a hard yes/no, and the model "
+                   "gives a *calibrated* probability that powers the no-call gate.")
+    with cc2:
+        cry = pd.DataFrame({
+            "carbapenemase-neg. isolates": bdf["cryptic_n"].values,
+            "…that are resistant": bdf["cryptic_resistant"].values,
+            "model AUROC there": bdf["cryptic_auroc"].values,
+        }, index=[DRUG_LABEL[d] for d in bdf["drug"]])
+        st.markdown("**Where the rule is blind: cryptic resistance**")
+        st.dataframe(cry, width="stretch")
+        st.caption("On isolates with **no** known carbapenemase the rule is blind — it "
+                   "predicts 'susceptible' for all. The model still *ranks* cryptic "
+                   "resistance for doripenem and ertapenem (AUROC ~0.86), but not for "
+                   "imipenem / meropenem — largely because the main non-carbapenemase route, "
+                   "**porin loss**, isn't captured by acquired-gene features (a stated "
+                   "limitation, not a hidden one).")
+    st.info("**What the model adds beyond the lookup — honestly.** Its robust value is "
+            "(1) *calibrated* probabilities that power principled abstention (the rule gives "
+            "only a hard yes/no), and (2) generalisation to drug/species where the mechanism "
+            "catalogue is incomplete — the rule only works because we happen to have a "
+            "curated carbapenemase list for this exact case. As a partial bonus it also ranks "
+            "some carbapenemase-negative resistance, though that is bounded by the missing "
+            "porin-loss signal above.")
+
     c1, c2 = st.columns([1.1, 1], gap="large")
     with c1:
         st.markdown("**Reliability diagrams** — calibrated probabilities track the "
@@ -617,12 +922,12 @@ with tab_surv:
         st.markdown("**Lab-measured carbapenem resistance prevalence** (per drug)")
         prev = cohort_df.set_index("drug")["lab_resistant_pct"]
         prev.index = [DRUG_LABEL[d] for d in prev.index]
-        st.bar_chart(prev, height=260, color="#C62828")
+        st.bar_chart(prev, height=260, color="#C0392B")
     with cB:
         st.markdown("**Carbapenemase-gene carriage** across the cohort (isolate count)")
         carr = pd.Series(carriage)
         carr = carr[carr >= 2]  # drop ultra-rare singletons for readability
-        st.bar_chart(carr, height=260, color="#185FA5", horizontal=True)
+        st.bar_chart(carr, height=260, color="#1E5FA8", horizontal=True)
 
     st.markdown("**Model verdict distribution per drug** — how often the system calls "
                 "fail / works / abstains on the cohort.")
@@ -631,7 +936,7 @@ with tab_surv:
     vd = vd.rename(columns={"likely_to_fail": "likely to fail",
                             "likely_to_work": "likely to work", "no_call": "no-call"})
     st.bar_chart(vd, height=280,
-                 color=["#C62828", "#2E7D32", "#E0A100"], stack="normalize")
+                 color=["#C0392B", "#1E8E4E", "#B5760B"], stack="normalize")
 
     show = cohort_df.copy()
     show["drug"] = [DRUG_LABEL[d] for d in show["drug"]]

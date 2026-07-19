@@ -1,22 +1,22 @@
 {
   "doripenem": {
-    "no_call_pct": 9.8,
-    "balanced_acc_on_called": 0.886,
+    "no_call_pct": 5.7,
+    "balanced_acc_on_called": 0.939,
     "ood_tau": 13.0
   },
   "ertapenem": {
-    "no_call_pct": 19.4,
-    "balanced_acc_on_called": 0.952,
+    "no_call_pct": 7.2,
+    "balanced_acc_on_called": 0.934,
     "ood_tau": 13.0
   },
   "imipenem": {
-    "no_call_pct": 17.5,
-    "balanced_acc_on_called": 0.951,
+    "no_call_pct": 8.5,
+    "balanced_acc_on_called": 0.941,
     "ood_tau": 13.0
   },
   "meropenem": {
-    "no_call_pct": 12.6,
-    "balanced_acc_on_called": 0.916,
+    "no_call_pct": 5.5,
+    "balanced_acc_on_called": 0.923,
     "ood_tau": 12.1
   }
 }
