@@ -19,4 +19,5 @@ env/
 # Internal / not-for-public docs (kept locally, never pushed)
 HANDOFF.md
 docs/SUBMISSION.md
+docs/TALKING_POINTS.md
 docs/challenge_brief.pdf
